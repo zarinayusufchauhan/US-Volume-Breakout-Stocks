@@ -21,15 +21,16 @@ client = gspread.authorize(creds)
 # आपकी शीट की ID 
 spreadsheet_id = "1Ub7LjwdrIcEHW48qv-cQCxbd6SN3uspqqaL3fH6_a5w"
 
-# दोनों शीट्स को कनेक्ट करना
+# शीट को कनेक्ट करना
 try:
-    ws_volume = client.open_by_key(spreadsheet_id).worksheet("US volume breakout stocks")
-    ws_turnover = client.open_by_key(spreadsheet_id).worksheet("US volume breakout stocks")
+    ws = client.open_by_key(spreadsheet_id).worksheet("US volume breakout stocks")
+    print(f"✅ Sheet 'US volume breakout stocks' से connected!")
 except Exception as e:
     print(f"Sheet Connection Error: {e}")
     exit(1)
 
 # 2. Top 250 US Stocks की list
+# S&P 500 और Nasdaq-100 के top stocks
 TOP_US_STOCKS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TESLA", "META", "BERKB", "JPM", "JNJ",
     "V", "WMT", "PG", "MA", "DIS", "BA", "MCD", "GS", "AXP", "HD",
@@ -69,20 +70,19 @@ TOP_US_STOCKS = [
 # शुरुआत में 250 stocks तक सीमित करो
 TOP_US_STOCKS = TOP_US_STOCKS[:250]
 
-# 3. Yahoo Finance से US Stocks का data लाना
+# 3. Yahoo Finance से data लाना
 def fetch_us_stocks_data():
     print(f"\n--- US Stocks का Data ला रहे हैं ({len(TOP_US_STOCKS)} stocks) ---")
     
-    all_data_volume = []
-    all_data_turnover = []
+    all_data = []
     failed_stocks = []
     
     for idx, symbol in enumerate(TOP_US_STOCKS, 1):
         try:
             print(f"Fetching {idx}/250: {symbol}...", end=" ")
             
-            # Yahoo Finance से data लेना (1 साल का historical data)
-            data = yf.download(symbol, period="1y", progress=False)
+            # Yahoo Finance से data लेना
+            data = yf.download(symbol, period="250d", progress=False)
             
             if len(data) < 200:
                 print(f"⚠️ Not enough historical data")
@@ -91,23 +91,35 @@ def fetch_us_stocks_data():
             
             # Latest values
             latest_close = data['Close'].iloc[-1]
-            latest_volume = int(data['Volume'].iloc[-1])
+            latest_volume = data['Volume'].iloc[-1]
             
-            # Turnover = Volume * Close Price
-            latest_turnover = latest_volume * latest_close
+            # DMA calculations (अगर data काफी है)
+            if len(data) >= 50:
+                dma_50 = data['Close'].tail(50).mean()
+            else:
+                dma_50 = latest_close
+                
+            if len(data) >= 100:
+                dma_100 = data['Close'].tail(100).mean()
+            else:
+                dma_100 = latest_close
+                
+            if len(data) >= 200:
+                dma_200 = data['Close'].tail(200).mean()
+            else:
+                dma_200 = latest_close
             
-            # Volume के आधार पर data
-            all_data_volume.append([
+            all_data.append([
                 symbol,
-                latest_volume,
-                round(latest_close, 2)
-            ])
-            
-            # Turnover के आधार पर data
-            all_data_turnover.append([
-                symbol,
-                round(latest_turnover, 2),
-                round(latest_close, 2)
+                int(latest_volume),
+                round(latest_close, 2),
+                round(latest_close, 2),  # CMP
+                round(dma_50, 2),
+                round(dma_100, 2),
+                round(dma_200, 2),
+                "",  # Output (formula में calculate होगा)
+                "",  # Difference from 200 DMA (formula में)
+                ""   # CAR (formula में)
             ])
             
             print(f"✅")
@@ -120,44 +132,30 @@ def fetch_us_stocks_data():
             failed_stocks.append(symbol)
             continue
     
-    print(f"\n✅ {len(all_data_volume)} stocks का data successfully fetch हुआ!")
+    print(f"\n✅ {len(all_data)} stocks का data successfully fetch हुआ!")
     if failed_stocks:
         print(f"⚠️ {len(failed_stocks)} stocks failed: {', '.join(failed_stocks[:10])}")
     
-    return all_data_volume, all_data_turnover
+    return all_data
 
-# 4. Volume के आधार पर टॉप 250 (Volume Descending)
-def get_top_by_volume(data):
-    df = pd.DataFrame(data, columns=['Symbol', 'Volume', 'Close'])
-    df = df.sort_values(by='Volume', ascending=False).head(250)
-    return df[['Symbol', 'Volume', 'Close']].values.tolist()
-
-# 5. Turnover के आधार पर टॉप 250 (Turnover Descending)
-def get_top_by_turnover(data):
-    df = pd.DataFrame(data, columns=['Symbol', 'Turnover', 'Close'])
-    df = df.sort_values(by='Turnover', ascending=False).head(250)
-    return df[['Symbol', 'Turnover', 'Close']].values.tolist()
-
-# 6. Google Sheet को update करना
-def update_google_sheet(data_volume, data_turnover, fetched_date_str):
+# 4. Google Sheet को update करना
+def update_google_sheet(data):
     try:
         print(f"\n--- Google Sheet को update कर रहे हैं ---")
         
-        # वॉल्यूम डेटा update करना (पहली 125 rows)
-        ws_volume.batch_clear(['A2:C126'])
-        ws_volume.update('A2', data_volume[:125])
-        print("✅ Top 125 Volume stocks का data add हुआ")
+        # पुराना data clear करना (A2:J251 तक)
+        ws.batch_clear(['A2:J251'])
+        print("✅ पुराना data clear किया")
         
-        # Turnover डेटा update करना (126 से 250 rows)
-        ws_volume.batch_clear(['A127:C251'])
-        ws_volume.update('A127', data_turnover[:125])
-        print("✅ Top 125 Turnover stocks का data add हुआ")
+        # नया data डालना
+        ws.update('A2', data)
+        print(f"✅ {len(data)} stocks का data Google Sheet में add हो गया!")
         
         # Timestamp update करना
         ist_now = (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime('%d-%b %H:%M')
-        status_msg = f"Data Date: {fetched_date_str} | Last Update: {ist_now} (IST) | Total: 250 Stocks"
+        status_msg = f"Last Update: {ist_now} (IST) | Total Stocks: {len(data)}"
         
-        ws_volume.update('A1', [[status_msg]])
+        ws.update('A1', [[status_msg]])
         print(f"✅ Timestamp updated: {status_msg}")
         
         return True
@@ -166,24 +164,16 @@ def update_google_sheet(data_volume, data_turnover, fetched_date_str):
         print(f"❌ Google Sheet अपडेट करने में Error: {e}")
         return False
 
-# 7. Main Execution
+# 5. Main Execution
 if __name__ == "__main__":
-    print("🚀 US Stock Market Volume & Turnover Updater शुरू हो रहा है...")
+    print("🚀 US Stock Market Auto Updater शुरू हो रहा है...")
     
     # Data लाना
-    data_volume, data_turnover = fetch_us_stocks_data()
+    data = fetch_us_stocks_data()
     
-    if data_volume and data_turnover:
-        # Volume के आधार पर sort करना
-        top_volume = get_top_by_volume(data_volume)
-        
-        # Turnover के आधार पर sort करना
-        top_turnover = get_top_by_turnover(data_turnover)
-        
-        fetched_date_str = datetime.now().strftime('%d-%b-%Y')
-        
+    if data:
         # Google Sheet update करना
-        if update_google_sheet(top_volume, top_turnover, fetched_date_str):
+        if update_google_sheet(data):
             print("\n✅ SUCCESS: सब कुछ perfectly update हो गया!")
         else:
             print("\n❌ FAILED: Google Sheet update नहीं हुई")
